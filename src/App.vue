@@ -87,6 +87,7 @@ export default {
       margin-top: 4rem;
       margin-bottom: 7px;
       padding: 0 16px;
+      color:#9CAAC1 !important;
     }
     .user-info{
       margin-top: 0;
@@ -116,9 +117,11 @@ export default {
       margin-top: calc(100% - 75px);
       font-weight: 600;
       font-size: 16px;
+      color:#0E2B5E !important;
     }
     .version{
       margin: 0;
+      color: #9CAAC1 !important;
       font-weight: 200;
     }
   }
@@ -137,6 +140,7 @@ export default {
       padding: 0;
       height: 24px;
       width: 24px;
+      color: #9CAAC1;
     }
   }
 
@@ -189,7 +193,6 @@ export default {
   }
 
   $body-font-family: "Montserrat";
-  $title-font: "Quicksand";
 
   .v-application {
     font-family: $body-font-family, sans-serif !important;
@@ -198,41 +201,45 @@ export default {
       font-family: $body-font-family, sans-serif !important;
       font-weight: 600 !important;
     }
+    .error--text{
+      font-size: 0.8rem !important;
+      font-weight: 700 !important;
+    }
     .display-1 {
       // To pin point specific classes of some components
-      font-family: $title-font, sans-serif !important;
+      font-family: $body-font-family, sans-serif !important;
     }
     .display-2 {
       // To pin point specific classes of some components
-      font-family: $title-font, sans-serif !important;
+      font-family: $body-font-family, sans-serif !important;
     }
     .display-3 {
       // To pin point specific classes of some components
-      font-family: $title-font, sans-serif !important;
+      font-family: $body-font-family, sans-serif !important;
     }
     .display-4 {
       // To pin point specific classes of some components
-      font-family: $title-font, sans-serif !important;
+      font-family: $body-font-family, sans-serif !important;
     }
     .display-5 {
       // To pin point specific classes of some components
-      font-family: $title-font, sans-serif !important;
+      font-family: $body-font-family, sans-serif !important;
     }
     .headline {
       // To pin point specific classes of some components
-      font-family: $title-font, sans-serif !important;
+      font-family: $body-font-family, sans-serif !important;
     }
     .title {
       // To pin point specific classes of some components
-      font-family: $title-font, sans-serif !important;
+      font-family: $body-font-family, sans-serif !important;
     }
     .v-list-item__title {
       // To pin point specific classes of some components
-      font-family: $title-font, sans-serif !important;
+      font-family: $body-font-family, sans-serif !important;
     }
     .v-card__title {
       // To pin point specific classes of some components
-      font-family: $title-font, sans-serif !important;
+      font-family: $body-font-family, sans-serif !important;
     }
   }
 </style>

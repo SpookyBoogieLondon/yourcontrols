@@ -7,7 +7,7 @@
     <div class="grid">
       <div class="custom-card">
         <div class="custom-title">
-          Sim Conect
+          Sim Connect
         </div>
         <div class="status">
           <div class="status-indicator"></div>

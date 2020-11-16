@@ -7,22 +7,88 @@
     <div class="grid">
       <div class="custom-card">
         <div class="custom-title">
-          Sim Conect
+          Connect
         </div>
-        <div class="status">
-          <div class="status-indicator"></div>
-          Not Connected
-        </div>
+          <v-row >
+            <v-col style="margin-top: 13px">
+              Server Address
+            </v-col>
+            <v-col align-self="center" cols="8">
+              <v-text-field
+                v-model="serverAddress"
+                :error-messages="serverAddressErrors"
+                required
+                @input="$v.serverAddress.$touch()"
+                @blur="$v.serverAddress.$touch()"
+                outlined
+              ></v-text-field>
+            </v-col>
+          </v-row>
+          <v-row >
+            <v-col style="margin-top: 13px">
+              Server Address
+            </v-col>
+            <v-col align-self="center" cols="8">
+              <v-text-field
+                v-model="serverPort"
+                :error-messages="serverPortErrors"
+                required
+                @input="$v.serverPort.$touch()"
+                @blur="$v.serverPort.$touch()"
+                outlined
+              ></v-text-field>
+            </v-col>
+          </v-row>
       </div>
     </div>
   </div>
 </template>
 
 <script>
+import { validationMixin } from 'vuelidate'
+import { required, numeric, ipAddress } from 'vuelidate/lib/validators'
+
 export default {
+  mixins: [validationMixin],
+
   name: 'Home',
+
+  validations: {
+    serverAddress: { required, ipAddress },
+    serverPort: { required, numeric },
+  },
+
   data:()=>({
-  })
+    serverAddress:"",
+    serverPort:""
+  }),
+
+  computed:{
+    serverAddressErrors () {
+        const errors = []
+        if (!this.$v.serverAddress.$dirty) return errors
+        !this.$v.serverAddress.ipAddress && errors.push('Enter a valid Server IP.')
+        !this.$v.serverAddress.required && errors.push('Server address is required.') 
+        return errors
+    },
+    serverPortErrors () {
+        const errors = []
+        if (!this.$v.serverPort.$dirty) return errors
+        !this.$v.serverPort.numeric && errors.push('Enter a valid Server Port.')
+        !this.$v.serverPort.required && errors.push('Server port is required.') 
+        return errors
+    },
+    test() {
+      return window.localStorage.getItem("Test")
+    }
+  },
+
+  mounted(){
+    // window.localStorage.setItem("Test","test")
+  }
+
+
+
 }
 </script>
 
@@ -45,9 +111,14 @@ export default {
 
 
   .custom-card{
+    .row{
+      background-color: transparent !important;
+    }
     border: 2px solid rgba(112, 112, 112, 0.149);
     padding: 15px 20px;
     border-radius: 12px;
+    background-color: transparent;
+    color: #0E2B5E;
     .custom-title{
       font-weight: 600;
       font-size: 14px;
