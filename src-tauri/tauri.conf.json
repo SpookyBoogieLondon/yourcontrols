@@ -37,9 +37,9 @@
     },
     "window": {
       "title": "Tauri App",
-      "width": 800,
-      "height": 600,
-      "resizable": true,
+      "width": 1200,
+      "height": 720,
+      "resizable": false,
       "fullscreen": false
     },
     "security": {
@@ -48,5 +48,10 @@
     "inliner": {
       "active": true
     }
+  },
+  "build": {
+    "distDir": "../dist",
+    "devPath": "http://localhost:8080",
+    "withGlobalTauri": false
   }
 }

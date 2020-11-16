@@ -4,7 +4,6 @@
         <ul>
           <li>
             <div class="user-info"><div class="user-img"></div>SafeShows</div>
-            <div class="hashtag">#0001</div>
           </li>
           <li><router-link to="/"> <div class="icon-dashboard" /> Dashboard</router-link></li>
           <li><router-link to="connect"> <div class="icon-dashboard" /> Connect</router-link></li>
@@ -27,7 +26,7 @@
 </template>
 
 <script>
-import { promisified } from 'tauri/api/tauri'
+// import { promisified } from 'tauri/api/tauri'
 
 export default {
   name: 'App',
@@ -38,21 +37,21 @@ export default {
 
 
   created:() => {
-    console.log("SEND")
-    var a = {
-      cmd: "startServerCommand",
-      payload: {
-        port: 9999,
-        ip: "10.2.5.10",
-        userName: "Hello"
-      }
-    };
+    // console.log("SEND")
+    // var a = {
+    //   cmd: "startServerCommand",
+    //   payload: {
+    //     port: 9999,
+    //     ip: "10.2.5.10",
+    //     userName: "Hello"
+    //   }
+    // };
 
-    promisified(a).then((success) => {
-      console.log({success})
-    }).catch((error) => {
-      console.error({error})
-    });
+    // promisified(a).then((success) => {
+    //   console.log({success})
+    // }).catch((error) => {
+    //   console.error({error})
+    // });
   }
 
 };
@@ -60,11 +59,11 @@ export default {
 
 <style lang="scss">
   .pageView{
-    padding: 2rem 75px;
+    padding: 2rem 3rem;
     border-radius: 40px 0 0 40px;
     background-color: #FFFFFF !important;
     width: auto;
-    box-shadow: 0 0 50px #00000020;
+    box-shadow: 0 0 50px rgba(0,0,0,0.15);
   }
 
   body{
@@ -78,7 +77,7 @@ export default {
   ul {
     list-style-type: none;
     margin: 0;
-    padding: 2rem 1rem;
+    padding: 2rem 2rem;
     height: 100vh;
     background-color: #EEF4FD;
   }
@@ -98,34 +97,25 @@ export default {
       text-decoration: none;
       align-items: center;
       font-weight: 600;
-      font-size: 18px;
-      transform: translateY(-5px);
+      font-size: 16px;
       .user-img{
-        border-radius:50%;
-        background-color:#0075FF;
-        height:45px;
-        width:45px;
-        margin:0;
+        border-radius: 50%;
+        background-color: #0075FF;
+        height: 40px;
+        width: 40px;
+        margin: 0;
         margin-right: 16px;
-        padding:0;
-        transform: translateY(9px);
+        padding: 0;
       }
     }
-    .hashtag{
-      padding: 0 16px;
-      margin:0;
-      transform: translate( 60px, calc( -5rem + -18px) );
-      font-weight: 300;
-    }
-
-    
   }
 
   .bottom-nav-text{
     div{
       margin: 0;
-      margin-top: calc(100% + 15px);
-      font-weight: 400;
+      margin-top: calc(100% - 75px);
+      font-weight: 600;
+      font-size: 16px;
     }
     .version{
       margin: 0;
@@ -136,13 +126,14 @@ export default {
   li a {
     display: flex;
     color: #9CAAC1 !important;
-    height: 60px;
+    height: 45px;
     padding: 0 16px;
     text-decoration: none;
     align-items: center;
+    font-size: 14px !important;
     div {
       margin: 0;
-      margin-right: 10px;
+      margin-right: 5px;
       padding: 0;
       height: 24px;
       width: 24px;
@@ -172,24 +163,28 @@ export default {
 
   .grid{
     display: grid;
-    grid-template-columns: 20rem auto;
+    grid-template-columns: 25vw auto;
     background-color:#EEF4FD;
   }
 
   .icon-dashboard{
-    background-size: 100%;
+    background-size: 80%;
+    background-position: center;
     background-image: url("./assets/icons/dashboard-9CAAC1.png");
   }
   .icon-server{
-    background-size: 100%;
+    background-size: 80%;
+    background-position: center;
     background-image: url("./assets/icons/server-9CAAC1.png");
   }
   .icon-settings{
-    background-size: 100%;
+    background-size: 80%;
+    background-position: center;
     background-image: url("./assets/icons/settings-9CAAC1.png");
   }
   .icon-headphones{
-    background-size: 100%;
+    background-size: 80%;
+    background-position: center;
     background-image: url("./assets/icons/headphones-9CAAC1.png");
   }
 

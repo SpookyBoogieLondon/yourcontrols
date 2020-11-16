@@ -1,9 +1,9 @@
 <template>
   <div class="dashboard-page">
     <div class="page-title">
-      Dashboard
+      Connect
     </div>
-    <div class="page-subtitle">Check your connection, aircraft profile, and manage clients</div>
+    <div class="page-subtitle">Connect to other servers and fly with your friends</div>
     <div class="grid">
       <div class="custom-card">
         <div class="custom-title">
@@ -13,66 +13,6 @@
           <div class="status-indicator"></div>
           Not Connected
         </div>
-      </div>
-      <div class="custom-card">
-        <div class="custom-title">
-          Client Conection
-        </div>
-        <div class="status">
-          <div class="status-indicator"></div>
-          Not Connected
-        </div>
-      </div>
-      <div class="custom-card aircraft">
-        <div class="custom-title">
-          Selected Aircraft
-          <v-menu offset-y bottom left>
-            <template v-slot:activator="{ on, attrs }">
-              <v-btn color="primary" class="menu-dropdown" text v-bind="attrs" v-on="on">
-              </v-btn>
-            </template>
-            <v-list>
-              <v-list-item link>
-                <v-list-item-title>A32NX</v-list-item-title>
-              </v-list-item>
-            </v-list>
-          </v-menu>
-        </div>
-        <div class="aircraft-info">
-          <div class="pre-view"></div>
-          <div class="aircraft-name">A32NX</div>
-        </div>
-      </div>
-      <div class="custom-card connection-status">
-        <div class="custom-title">
-          Connection Status
-        </div>
-        <div class="custom-card">
-          <div class="custom-title">
-            Ping
-          </div>
-        </div>
-        <div class="custom-card">
-          <div class="custom-title">
-            Packet Loss
-          </div>
-        </div>
-        <div class="custom-card">
-          <div class="custom-title">
-            Download Rate
-          </div>
-        </div>
-        <div class="custom-card">
-          <div class="custom-title">
-            Upload Rate
-          </div>
-        </div>
-      </div>
-      <div class="custom-card client-list">
-        <div class="custom-title">
-          Connected Pilots
-        </div>
-        Here you'll be able to see all connected pilots. 
       </div>
     </div>
   </div>
@@ -189,8 +129,8 @@ export default {
   .grid{
     display:grid;
     background-color: #FFFFFF;
-    grid-template-columns: 15.2rem 15.2rem 15.2rem;
-    grid-template-rows: auto auto;
+    grid-template-columns: 30.4rem;
+    grid-template-rows: 300px;
     column-gap: 2.2rem;
     row-gap: 2rem;
     margin-top: calc(2rem + 15px);
