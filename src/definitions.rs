@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use simconnect::SimConnector;
 
 use std::{collections::HashMap, collections::HashSet, collections::hash_map::Entry, fmt::Display, fs::File, time::Instant, path::PathBuf};
-use crate::{interpolate::Interpolate, interpolate::InterpolateOptions, sync::{gaugecommunicator::GaugeCommunicator, jscommunicator::{self, JSCommunicator}, transfer::{AircraftVars, Events}}, syncdefs::{NumDigitSet, NumIncrement, NumSet, Syncable, ToggleSwitch, BusToggle}, util::Category, util::InDataTypes, util::VarReaderTypes, util::resolve_relative_path, varreader::SimValue};
+use crate::{interpolate::Interpolate, interpolate::InterpolateOptions, sync::{gaugecommunicator::{GetResult, LVarResult}, jscommunicator::{self, JSCommunicator}, transfer::{AircraftVars, Events, LVarSyncer}}, syncdefs::{CustomCalculator, NumDigitSet, NumIncrement, NumSet, Syncable, ToggleSwitch}, util::Category, util::InDataTypes, util::VarReaderTypes, util::resolve_relative_path, varreader::SimValue, velocity::VelocityCorrector};
 
 #[derive(Debug)]
 pub enum ConfigLoadError {
@@ -19,6 +19,18 @@ impl Display for ConfigLoadError {
             ConfigLoadError::FileError => write!(f, "Could not open file."),
             ConfigLoadError::YamlError(e, file_name) => write!(f, "Could not parse {} as YAML...{}", file_name, e.to_string()),
             ConfigLoadError::ParseError(e, file_name) => write!(f, "Error parsing configuration in {}...{}", file_name, e)
+        }
+    }
+}
+
+pub enum WriteDataError {
+    MissingMapping(String)
+}
+
+impl Display for WriteDataError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WriteDataError::MissingMapping(mapping_name) => write!(f, "No definition exists for {}. Do you have matching .yaml files?", mapping_name),
         }
     }
 }
@@ -123,7 +135,7 @@ fn evalute_condition_values(condition: &Condition, value: &VarReaderTypes) -> bo
     return false
 }
 
-fn evalute_condition(jscommunicator: &JSCommunicator, avarstransfer: &AircraftVars, condition: Option<&Condition>, incoming_value: &VarReaderTypes) -> bool {
+fn evalute_condition(lvarstransfer: &LVarSyncer, avarstransfer: &AircraftVars, condition: Option<&Condition>, incoming_value: &VarReaderTypes) -> bool {
     let condition = match condition {
         Some(condition) => condition,
         None => return true
@@ -131,8 +143,8 @@ fn evalute_condition(jscommunicator: &JSCommunicator, avarstransfer: &AircraftVa
 
     if let Some(var_data) = condition.var.as_ref() {
         if var_data.var_name.starts_with("L:") {
-            if let Some(value) = jscommunicator.get_cached_var(&var_data.var_name) {
-                return evalute_condition_values(condition, &VarReaderTypes::F64(*value))
+            if let Some(value) = lvarstransfer.get_var(&var_data.var_name) {
+                return evalute_condition_values(condition, &VarReaderTypes::F64(value))
             }
         } else {
             if let Some(value) = avarstransfer.get_var(&var_data.var_name) {
@@ -205,7 +217,9 @@ struct VarEntry {
     update_every: Option<f64>,
     condition: Option<Condition>,
     #[serde(default)]
-    constant: bool
+    constant: bool,
+    #[serde(default)]
+    unreliable: bool,
 }
 
 #[derive(Deserialize)]
@@ -229,12 +243,15 @@ struct NumSetGenericEntry<T> {
     event_name: String,
     event_param: Option<u32>,
     multiply_by: Option<T>,
+    add_by: Option<T>,
     #[serde(default)]
     use_calculator: bool,
     #[serde(default)]
     index_reversed: bool,
     // The event to call after the number is set
     swap_event_name: Option<String>,
+    #[serde(default)]
+    unreliable: bool,
 }
 
 #[derive(Deserialize)]
@@ -260,9 +277,9 @@ struct NumDigitSetEntry {
 }
 
 #[derive(Deserialize)]
-struct BusEntry {
-    connection_index: u16,
-    bus_index: u16,
+struct CustomCalculatorEntry {
+    get: String,
+    set: String,
     condition: Option<Condition>
 }
 
@@ -370,7 +387,7 @@ pub struct Definitions {
     // Events to listen to
     events: Events,
     // Helper struct to execute calculator events
-    gaugetransfer: GaugeCommunicator,
+    lvarstransfer: LVarSyncer,
     // Helper struct to retrieve/set vars not settable in SimConnect
     jstransfer: JSCommunicator,
     // Helper struct to retrieve *changed* aircraft variables using the CHANGED and TAGGED flags in SimConnect
@@ -384,6 +401,10 @@ pub struct Definitions {
     last_written: HashMap<String, Instant>,
     // Values to constantly keep updating, even if no data was received
     constant_avars: HashMap<String, Option<VarReaderTypes>>,
+    // Vars that shouldn't be sent reliably
+    unreliable_vars: HashSet<String>,
+    // Helper struct to correct aircraft velocity
+    velocity_corrector: VelocityCorrector,
     // Vars that should not be sent over the network
     do_not_sync: HashSet<String>,
     // Structs that actually do the interpolation
@@ -415,7 +436,7 @@ impl Definitions {
         Self {
             mappings: HashMap::new(),
             events: Events::new(1),
-            gaugetransfer: GaugeCommunicator::new(),
+            lvarstransfer: LVarSyncer::new(),
             jstransfer: JSCommunicator::new(),
             avarstransfer: AircraftVars::new(1),
 
@@ -426,6 +447,8 @@ impl Definitions {
             interpolation_avars: Interpolate::new(),
             
             constant_avars: HashMap::new(),
+            unreliable_vars: HashSet::new(),
+            velocity_corrector: VelocityCorrector::new(2),
             do_not_sync: HashSet::new(),
             
             categories: HashMap::new(),
@@ -444,6 +467,10 @@ impl Definitions {
             if std::matches!(var_type, VarType::AircraftVar) {
                 self.interpolation_avars.set_key_options(&var_name, options);
             }
+        }
+
+        if var.unreliable {
+            self.unreliable_vars.insert(var_name.clone());
         }
         
         // Handle custom periods
@@ -481,7 +508,7 @@ impl Definitions {
     fn add_local_variable(&mut self, category: &str, var_name: &str, var_units: Option<&str>) -> Result<(), VarAddError> {
         let category = get_category_from_string(category)?;
 
-        self.jstransfer.add_local_var(var_name.to_string(), var_units.map(String::from));
+        self.lvarstransfer.add_var(var_name.to_string(), var_units.map(String::from));
         self.categories.insert(var_name.to_string(), category);
 
         Ok(())
@@ -570,7 +597,11 @@ impl Definitions {
         let mut action = Box::new(NumSet::new(event_id));
 
         if var.use_calculator || var.event_param.is_some() {
-            action.set_calculator_event_name(Some(&var.event_name))
+            action.set_calculator_event_name(Some(&var.event_name), var.event_param.is_some())
+        }
+
+        if var.unreliable {
+            self.unreliable_vars.insert(var.var_name.clone());
         }
 
         if let Some(event_param) = var.event_param {
@@ -579,6 +610,10 @@ impl Definitions {
 
         if let Some(multiply_by) = var.multiply_by {
             action.set_multiply_by(multiply_by);
+        }
+
+        if let Some(add_by) = var.add_by {
+            action.set_add_by(add_by);
         }
 
         if let Some(swap_event) = var.swap_event_name.as_ref() {
@@ -661,13 +696,13 @@ impl Definitions {
         Ok(())
     }
 
-    fn add_bus_entry(&mut self, category: &str, var: BusEntry) -> Result<(), VarAddError> {
+    fn add_custom_calculator(&mut self, category: &str, var: CustomCalculatorEntry) -> Result<(), VarAddError> {
         let category = get_category_from_string(category)?;
         
-        let var_name = self.jstransfer.add_bus(var.connection_index, var.bus_index);
+        let var_name = self.lvarstransfer.add_custom_var(var.get);
 
         self.categories.insert(var_name.clone(), category);
-        self.add_mapping(var_name, ActionType::Bool(Box::new(BusToggle::new(var.bus_index, var.connection_index))), var.condition)?;
+        self.add_mapping(var_name, ActionType::F64(Box::new(CustomCalculator::new(var.set))), var.condition)?;
 
         Ok(())
     }
@@ -685,7 +720,7 @@ impl Definitions {
             "NUMSET" => self.add_num_set(category, try_cast_yaml!(value))?,
             "NUMINCREMENT" => self.add_num_increment(category, try_cast_yaml!(value))?,
             "NUMDIGITSET" => self.add_num_digit_set(category, try_cast_yaml!(value))?,
-            "BUSTOGGLE" => self.add_bus_entry(category, try_cast_yaml!(value))?,
+            "CUSTOMCALCULATOR" => self.add_custom_calculator(category, try_cast_yaml!(value))?,
             _ => return Err(VarAddError::InvalidSyncType(type_str.to_string()))
         };
 
@@ -737,29 +772,51 @@ impl Definitions {
         }
     }
 
-    fn queue_local_var(&mut self, name: String, value: f64) {
-        if self.did_write_recently(&name) {return}
-        self.current_sync.lvars.insert(name, value);
+    fn process_local_var(&mut self, result: GetResult) {
+        if let Some(mappings) = self.mappings.get_mut(&result.var_name) {
+            for mapping in mappings {
+                execute_mapping!(new_value, action, VarReaderTypes::F64(result.var.floating), mapping, {
+                    action.set_current(new_value)
+                }, {});
+            }
+        }
+
+        if self.did_write_recently(&result.var_name) {return}
+        self.current_sync.lvars.insert(result.var_name, result.var.floating);
+    }
+
+    // Processes client data and adds to the result queue if it changed
+    pub fn process_client_data(&mut self, conn: &simconnect::SimConnector, data: &simconnect::SIMCONNECT_RECV_CLIENT_DATA) {
+        // Get var data
+        let lvar = match self.lvarstransfer.process_client_data(conn ,data) {
+            Some(var) => var,
+            None => return
+        };
+
+        match lvar {
+            LVarResult::Single(result) => self.process_local_var(result),
+            LVarResult::Multi(results) => {
+                for result in results {
+                    self.process_local_var(result);
+                }
+            }
+        }
     }
 
     fn process_js_data(&mut self) {
-        if let Ok(payload) = self.jstransfer.poll() {
+        if let Some(payload) = self.jstransfer.poll() {
             match payload {
-                jscommunicator::Payloads::MultiVar { data } => {
-                    for (name, value) in data {
-                        self.queue_local_var(name, value);
-                    }
-                }
-                jscommunicator::Payloads::SingleVar { name, value } => self.queue_local_var(name, value),
                 jscommunicator::Payloads::Interaction { name: interaction_name } => {
                     self.current_sync.events.push(EventTriggered { event_name: interaction_name, data: 0})
                 }
+                _ => {}
             }
         };
     }
 
     // Processes event data name and the additional dword data
     pub fn process_event_data(&mut self, data: &simconnect::SIMCONNECT_RECV_EVENT) {
+        // Not for us
         if data.uGroupID != self.events.group_id {return}
         
         // Regular KEY event
@@ -779,10 +836,14 @@ impl Definitions {
 
     // Process changed aircraft variables and update SyncActions related to it
     pub fn process_sim_object_data(&mut self, data: &simconnect::SIMCONNECT_RECV_SIMOBJECT_DATA) {
+        self.velocity_corrector.process_sim_object_data(data);
+
         if self.avarstransfer.define_id != data.dwDefineID {return}
         
         // Data might be bad/config files don't line up
-        if let Ok(data) = self.avarstransfer.read_vars(data) {
+        if let Ok(mut data) = self.avarstransfer.read_vars(data) {
+            // Remove wind
+            self.velocity_corrector.remove_wind_component(&mut data);
             // Update all syncactions with the changed values
             for (var_name, value) in data {
                 // Set current var syncactions
@@ -812,6 +873,7 @@ impl Definitions {
     fn add_constants_to_data(&mut self, data: &mut SimValue) {
         // Add constants
         for (var_name, value) in self.constant_avars.iter() {
+            if data.contains_key(var_name) {continue}
             if let Some(value) = value {
                 data.insert(var_name.clone(), value.clone());
             }
@@ -838,7 +900,7 @@ impl Definitions {
     }
 
     fn split_interpolate(&self, data: &mut AllNeedSync) -> AllNeedSync {
-        data.filter_keep(|name| self.interpolate_vars.contains(name))
+        data.filter_keep(|name| self.interpolate_vars.contains(name) || self.unreliable_vars.contains(name))
     }
 
     pub fn get_need_sync(&mut self, sync_permission: &SyncPermission) -> (Option<AllNeedSync>, Option<AllNeedSync>) {
@@ -893,33 +955,37 @@ impl Definitions {
         }
     }
 
-    pub fn write_aircraft_data(&mut self, conn: &SimConnector, data: &mut AVarMap, time: f64, interpolate: bool) {
+    pub fn write_aircraft_data(&mut self, conn: &SimConnector, data: AVarMap, time: f64, interpolate: bool) {
         if data.len() == 0 {return}
 
         let mut to_sync = AVarMap::new();
         to_sync.reserve(data.len());
+
+        // Correct velocity
+        let mut data = data;
+        self.velocity_corrector.add_wind_component(&mut data);
 
         // Only sync vars that are defined as so
         for (var_name, data) in data {
             self.last_written.insert(var_name.to_string(), Instant::now());
 
             // Log constant
-            if let Some(value) = self.constant_avars.get_mut(var_name) {
+            if let Some(value) = self.constant_avars.get_mut(&var_name) {
                 *value = Some(data.clone());
             }
 
             // Otherwise sync them using defined events
-            if let Some(mappings) = self.mappings.get_mut(var_name) {
+            if let Some(mappings) = self.mappings.get_mut(&var_name) {
                 for mapping in mappings {
-                    if !evalute_condition(&self.jstransfer, &self.avarstransfer, mapping.condition.as_ref(), data) {continue}
+                    if !evalute_condition(&self.lvarstransfer, &self.avarstransfer, mapping.condition.as_ref(), &data) {continue}
 
-                    execute_mapping!(new_value, action, *data, mapping, {
-                        action.set_new(new_value, conn, &mut self.jstransfer, &mut self.gaugetransfer)
+                    execute_mapping!(new_value, action, data, mapping, {
+                        action.set_new(new_value, conn, &mut self.lvarstransfer)
                     }, {
-                        if interpolate && self.interpolate_vars.contains(var_name) {
+                        if interpolate && self.interpolate_vars.contains(&var_name) {
                             // Queue data for interpolation
                             if let VarReaderTypes::F64(value) = data {
-                                self.interpolation_avars.queue_interpolate(&var_name, time, *value)
+                                self.interpolation_avars.queue_interpolate(&var_name, time, value)
                             }
                         } else {
                             // Set data right away
@@ -935,60 +1001,88 @@ impl Definitions {
         self.avarstransfer.set_vars(conn, &to_sync);
     }
 
-    pub fn write_local_data(&mut self, conn: &SimConnector, data: &LVarMap, interpolate: bool) {
+    pub fn write_local_data(&mut self, conn: &SimConnector, data: LVarMap, _interpolate: bool) -> Result<(), WriteDataError> {
         for (var_name, value) in data {
-            for mapping in self.mappings.get_mut(var_name).unwrap() {
-                if !evalute_condition(&self.jstransfer, &self.avarstransfer, mapping.condition.as_ref(), &VarReaderTypes::F64(*value)) {continue}
 
-                execute_mapping!(new_value, action, VarReaderTypes::F64(*value), mapping, {
-                    action.set_new(new_value, conn, &mut self.jstransfer, &mut self.gaugetransfer)
-                }, {
-                    self.jstransfer.set(var_name.clone(), None, Some(*value));
-                });
-                self.last_written.insert(var_name.to_string(), Instant::now());
+            match self.mappings.get_mut(&var_name) {
+                Some(mappings) => {
+                    for mapping in mappings {
+
+                        if !evalute_condition(&self.lvarstransfer, &self.avarstransfer, mapping.condition.as_ref(), &VarReaderTypes::F64(value)) {continue}
+        
+                        execute_mapping!(new_value, action, VarReaderTypes::F64(value), mapping, {
+                            action.set_new(new_value, conn, &mut self.lvarstransfer)
+                        }, {
+                            self.lvarstransfer.set(conn, &var_name, value.to_string().as_ref());
+                        });
+        
+                        self.last_written.insert(var_name.clone(), Instant::now());
+
+                    }
+                }
+                None => return Err(WriteDataError::MissingMapping(var_name))
             }
         }
+
+        Ok(())
     }
 
-    pub fn write_event_data(&mut self, conn: &SimConnector, data: &EventData) {
+    pub fn write_event_data(&mut self, conn: &SimConnector, data: EventData) -> Result<(), WriteDataError> {
         for event in data {
 
             if event.event_name.starts_with("H:") {
-                self.gaugetransfer.set(conn, &event.event_name, None, "");
+                // Use gauge to transmit H: event
+                self.lvarstransfer.set_unchecked(conn, &event.event_name, None, "");
+
             } else {
-                self.events.trigger_event(conn, &event.event_name, event.data as u32);
+                // Event doesn't exist
+                if let Err(()) = self.events.trigger_event(conn, &event.event_name, event.data as u32) {
+                    return Err(WriteDataError::MissingMapping(event.event_name))
+                };
+
             }
             
-            self.last_written.insert(event.event_name.clone(), Instant::now());
+            self.last_written.insert(event.event_name, Instant::now());
         }
+
+        Ok(())
     }
 
-    pub fn on_receive_data(&mut self, conn: &SimConnector, data: AllNeedSync, time: f64, sync_permission: &SyncPermission, interpolate: bool) {
+    pub fn on_receive_data(&mut self, conn: &SimConnector, data: AllNeedSync, time: f64, sync_permission: &SyncPermission, interpolate: bool) -> Result<(), WriteDataError> {
         let mut data = data;
         self.filter_all_sync(&mut data, sync_permission);
 
-        self.write_aircraft_data(conn, &mut data.avars, time, interpolate);
-        self.write_local_data(conn, &data.lvars, interpolate);
-        self.write_event_data(conn, &data.events);
+        // In this specific order
+        // Aircraft var data should overwrite any event data
+        self.write_event_data(conn, data.events)?;
+        self.write_aircraft_data(conn, data.avars, time, interpolate);
+        self.write_local_data(conn, data.lvars, interpolate)?;
+
+        Ok(())
     }
 
     // To be called when SimConnect connects
-    pub fn on_connected(&mut self, conn: &SimConnector) {
+    pub fn on_connected(&mut self, conn: &SimConnector) -> Result<(), ()> {
         self.interpolation_avars.reset();
 
         self.avarstransfer.on_connected(conn);
         self.events.on_connected(conn);
-        self.gaugetransfer.on_connected(conn);
+        self.lvarstransfer.on_connected(conn);
+        self.velocity_corrector.on_connected(conn);
 
-        self.jstransfer.start();
+        // Might be running another instance
+        if let Err(_) = self.jstransfer.start() {return Err(())};
 
+        // Get aircraft data
         conn.request_data_on_sim_object(0, self.avarstransfer.define_id, 0, simconnect::SIMCONNECT_PERIOD_SIMCONNECT_PERIOD_SIM_FRAME, simconnect::SIMCONNECT_CLIENT_DATA_REQUEST_FLAG_CHANGED | simconnect::SIMCONNECT_CLIENT_DATA_REQUEST_FLAG_TAGGED, 0, 0, 0);
+
+        Ok(())
     }
 
     pub fn get_all_current(&self) -> AllNeedSync {
         AllNeedSync {
             avars: self.avarstransfer.get_all_vars().clone(),
-            lvars: self.jstransfer.get_all_vars(),
+            lvars: self.lvarstransfer.get_all_vars(),
             events: EventData::new(),
         }
     }
@@ -1006,7 +1100,7 @@ impl Definitions {
     }
 
     pub fn get_number_lvars(&self) -> usize {
-        return self.jstransfer.get_number_defined()
+        return self.lvarstransfer.get_number_defined()
     }
 
     pub fn reset_interpolate(&mut self) {

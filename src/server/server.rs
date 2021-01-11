@@ -91,6 +91,7 @@ impl TransferStruct {
             Payloads::PeerEstablished { .. } => {return}  // No client should be able to send this
             // No processing needed
             Payloads::Update { .. } => {}
+            Payloads::Ready => {}
             // Used
             Payloads::InitHandshake { name, version } => {
                 // Version check
@@ -388,11 +389,7 @@ impl Server {
                                 } else {
                                         // Client disconnected
                                     transfer.remove_client(addr);
-
                                 }
-                            }
-                            Error::SerdeError(e) => {
-                                error!("Error deserializing data: {}", e)
                             }
                             Error::ReadTimeout => {
                                 break
@@ -460,7 +457,7 @@ impl TransferClient for Server {
         // Read for initial contact with other clients
         if let Some(transfer) = self.transfer.as_ref() {
             if let Some(client) = transfer.lock().unwrap().clients.get_mut(&target) {
-                client.is_observer = true;
+                client.is_observer = is_observer;
             }
         }
 

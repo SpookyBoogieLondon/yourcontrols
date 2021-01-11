@@ -1,4 +1,4 @@
-// #![windows_subsystem = "windows"]
+#![windows_subsystem = "windows"]
 
 mod app;
 mod clientmanager;
@@ -11,6 +11,7 @@ mod syncdefs;
 mod update;
 mod util;
 mod varreader;
+mod velocity;
 
 use app::{App, AppMessage, ConnectionMethod};
 use clientmanager::ClientManager;
@@ -61,8 +62,8 @@ fn write_configuration(config: &Config) {
 
 fn calculate_update_rate(update_rate: u16) -> f64 {1.0 / update_rate as f64}
 
-fn start_client(timeout: u64, username: String, session_id: String, isipv6: bool, ip: Option<IpAddr>, hostname: Option<String>, port: Option<u16>, method: ConnectionMethod) -> Result<Client, String> {
-    let mut client = Client::new(username, timeout);
+fn start_client(timeout: u64, username: String, session_id: String, version: String, isipv6: bool, ip: Option<IpAddr>, hostname: Option<String>, port: Option<u16>, method: ConnectionMethod) -> Result<Client, String> {
+    let mut client = Client::new(username, version, timeout);
 
     let client_result = match method {
         ConnectionMethod::Direct => {
@@ -149,7 +150,7 @@ fn main() {
     let mut definitions = Definitions::new();
 
     let mut need_update = false;
-    let mut did_send_name = false;
+    let mut ready_to_send_data = false;
 
     let mut connection_time = None;
 
@@ -170,12 +171,12 @@ fn main() {
                 definitions.on_connected(&conn)
             }
             Err(e) => {
-                log::error!("[PROGRAM] Could not load configuration file {}: {}", config_to_load,e);
+                error!("[PROGRAM] Could not load configuration file {}: {}", config_to_load,e);
                 // Prevent server/client from starting as config could not be laoded.
                 *config_to_load = String::new();
                 return false;
             }
-        };
+        }.ok();
 
         definitions.reset_interpolate();
 
@@ -199,6 +200,9 @@ fn main() {
                         warn!("[SIM] SimConnect exception occurred: {}", unsafe {
                             data.dwException
                         });
+                    }
+                    DispatchResult::ClientData(data) => {
+                        definitions.process_client_data(&conn, data);
                     }
                     DispatchResult::Event(data) => {
                         definitions.process_event_data(data);
@@ -235,8 +239,8 @@ fn main() {
                                 control.finalize_transfer(&conn)
                             }
 
-                            if !clients.is_observer(&from) {
-                                definitions.on_receive_data(
+                            if !clients.is_observer(&from) && ready_to_send_data {
+                                match definitions.on_receive_data(
                                     &conn,
                                     data,
                                     time,
@@ -246,7 +250,12 @@ fn main() {
                                         is_init: true,
                                     },
                                     !need_update
-                                );
+                                ) {
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        client.stop(e.to_string());
+                                    }
+                                }
                                 // need_update is used here to determine whether to sync immediately (initial connection) or to interpolate
                                 need_update = false;
                             }
@@ -274,10 +283,6 @@ fn main() {
                         Payloads::PlayerJoined{name, in_control, is_observer, is_server} => {
                             info!("[NETWORK] {} connected. In control: {}, observing: {}, server: {}", name, in_control, is_observer, is_server);
                                 // Send initial aircraft state
-                            if control.has_control() {
-                                client.update(definitions.get_all_current(), false);
-                            }
-
                             app_interface.new_connection(&name);
 
                             if client.is_server() {
@@ -293,6 +298,12 @@ fn main() {
                             if in_control {
                                 app_interface.set_incontrol(&name);
                                 clients.set_client_control(name);
+                            }
+                        }
+                        // Person is ready to receive data
+                        Payloads::Ready => {
+                            if control.has_control() {
+                                client.update(definitions.get_all_current(), false);
                             }
                         }
                         Payloads::PlayerLeft{name} => {
@@ -382,12 +393,16 @@ fn main() {
             definitions.step(&conn, !control.has_control());
 
             // Handle initial connection delay, allows lvars to be processed
-            if let Some(connection_time) = connection_time {
-                if !did_send_name && !client.is_server() && connection_time.elapsed().as_secs() >= 3 {
-                    client.send_init(updater.get_version().to_string());
-                    did_send_name = true;
-                } else {
-                        // Update
+            if let Some(time) = connection_time {
+                if time.elapsed().as_secs() >= 3 {
+                    // Tell server we're ready to receive data after 3 seconds
+                    if !ready_to_send_data {
+                        ready_to_send_data = true;
+                        client.send_ready();
+                        definitions.clear_sync();
+                    }
+    
+                    // Update
                     let can_update = update_rate_instant.elapsed().as_secs_f64() > update_rate;
                     
                     if !observing && can_update {
@@ -438,6 +453,7 @@ fn main() {
                             Ok(_) => {
                                 // Assign server as transfer client
                                 transfer_client = Some(server);
+                                ready_to_send_data = true;
                                 info!("[NETWORK] Server started");
                             }
                             Err(e) => {
@@ -463,7 +479,7 @@ fn main() {
                         // Display attempting to start server
                         app_interface.attempt();
 
-                        match start_client(config.conn_timeout, username.clone(), session_id, isipv6, ip, hostname, port, method) {
+                        match start_client(config.conn_timeout, username.clone(), session_id, updater.get_version().to_string(), isipv6, ip, hostname, port, method) {
                             Ok(client) => {
                                 info!("[NETWORK] Client started.");
                                 transfer_client = Some(Box::new(client));
@@ -566,7 +582,7 @@ fn main() {
                 AppMessage::ForceTakeControl => {
                     if let Some(client) = transfer_client.as_ref() {
                         if let Some(client_name) = clients.get_client_in_control() {
-                            //Will send a loopback Payloads::TransferControl
+                                //Will send a loopback Payloads::TransferControl
                             client.take_control(client_name.clone())
                         }
                     }
@@ -579,7 +595,7 @@ fn main() {
             // Prevent sending any more data
             transfer_client = None;
             should_set_none_client = false;
-            did_send_name = false;
+            ready_to_send_data = false;
             connection_time = None;
         }
 

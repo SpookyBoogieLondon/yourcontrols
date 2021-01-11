@@ -16,7 +16,7 @@ const RENDEZVOUS_SERVER_HOSTNAME: &str = "cloudserver.yourcontrols.xyz";
 const RENDEZVOUS_PORT: u16 = 5555;
 
 pub fn get_bind_address(is_ipv6: bool, port: Option<u16>) -> SocketAddr {
-    let bind_string = format!("{}:{}", if is_ipv6 {"::"} else {"0.0.0.0"}, port.unwrap_or(0));
+    let bind_string = format!("{}:{}", if is_ipv6 {"[::]"} else {"0.0.0.0"}, port.unwrap_or(0));
     bind_string.parse().unwrap()
 }
 
@@ -41,9 +41,10 @@ pub fn get_rendezvous_server(is_ipv6: bool) -> Result<SocketAddr, HostnameLookup
 
 pub fn get_socket_config(timeout: u64) -> laminar::Config {
     laminar::Config {
-        heartbeat_interval: None,
-        idle_connection_timeout: Duration::from_secs(10000),
+        heartbeat_interval: Some(Duration::from_millis(HEARTBEAT_INTERVAL_MS)),
+        idle_connection_timeout: Duration::from_secs(timeout),
         receive_buffer_max_size: 65536,
+        max_packets_in_flight: u16::MAX,
         ..Default::default()
     }
 }
@@ -174,11 +175,8 @@ pub trait TransferClient {
         }).ok();
     }
 
-    fn send_init(&self, version: String) {
-        self.get_transmitter().try_send(Payloads::InitHandshake {
-            name: self.get_server_name().to_string(),
-            version
-        }).ok();
+    fn send_ready(&self) {
+        self.get_transmitter().try_send(Payloads::Ready).ok();
     }
 }
 

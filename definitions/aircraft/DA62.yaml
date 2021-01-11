@@ -5,7 +5,6 @@ include:
   - definitions/modules/magnetowithstarter.yaml
   - definitions/modules/navigation.yaml
   - definitions/modules/physics.yaml
-  - definitions/modules/radios.yaml
   - definitions/modules/singlega.yaml
 
 shared:
@@ -89,6 +88,14 @@ shared:
     var_units: Enum
     var_type: i32
     event_name: FUEL_SELECTOR_SET
+  -
+    type: var
+    var_name: L:XMLVAR_FUEL_Switch_Off_Blocker_1_IsOpen
+    var_type: f64
+  -
+    type: var
+    var_name: L:XMLVAR_FUEL_Switch_Off_Blocker_2_IsOpen
+    var_type: f64
   - # Fuel_Switch_Tranfer_Aux
     type: NumSet
     var_name: A:FUEL SELECTED TRANSFER MOD
@@ -109,7 +116,6 @@ shared:
     type: ToggleSwitch
     var_name: A:CIRCUIT SWITCH ON:30
     var_units: bool
-
     event_name: ELECTRICAL_CIRCUIT_TOGGLE
     event_param: 30
   - # ASOBO_ELECTRICAL_Switch_Alternator_Template
@@ -206,62 +212,3 @@ master:
     var_units: Number
     var_type: f64
     constant: true
-  
-server:
-  -
-    type: var
-    var_name: FUEL TANK LEFT MAIN LEVEL
-    var_units: percent
-    var_type: f64
-    update_every: 5
-  -
-    type: var
-    var_name: FUEL TANK RIGHT MAIN LEVEL
-    var_units: percent
-    var_type: f64
-    update_every: 5
-  -
-    type: var
-    var_name: PAYLOAD STATION WEIGHT:1
-    var_units: lbs
-    var_type: f64
-  -
-    type: var
-    var_name: PAYLOAD STATION WEIGHT:2
-    var_units: lbs
-    var_type: f64
-  -
-    type: var
-    var_name: PAYLOAD STATION WEIGHT:3
-    var_units: lbs
-    var_type: f64
-  -
-    type: var
-    var_name: PAYLOAD STATION WEIGHT:4
-    var_units: lbs
-    var_type: f64
-  -
-    type: var
-    var_name: PAYLOAD STATION WEIGHT:5
-    var_units: lbs
-    var_type: f64
-  -
-    type: var
-    var_name: PAYLOAD STATION WEIGHT:6
-    var_units: lbs
-    var_type: f64
-  -
-    type: var
-    var_name: PAYLOAD STATION WEIGHT:7
-    var_units: lbs
-    var_type: f64
-  -
-    type: var
-    var_name: PAYLOAD STATION WEIGHT:8
-    var_units: lbs
-    var_type: f64
-  -
-    type: var
-    var_name: PAYLOAD STATION WEIGHT:9
-    var_units: lbs
-    var_type: f64
