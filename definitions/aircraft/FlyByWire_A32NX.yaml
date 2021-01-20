@@ -1038,12 +1038,14 @@ shared:
   -
     type: event
     event_name: AP_APR_HOLD_ON
+  - # FBW_AIRBUS_Push_Heading_Track_Template
+    type: var
+    var_name: L:A32NX_TRK_FPA_MODE_ACTIVE
+    var_type: f64
   -
-    type: ToggleSwitch
-    var_name: A:AUTOPILOT THROTTLE ARM
-    var_units: Bool
-    var_type: bool
-    event_name: AUTO_THROTTLE_ARM
+    type: var
+    var_name: L:A320_FCU_SHOW_SELECTED_SPEED
+    var_type: f64
   -
     type: ToggleSwitch
     var_name: A:AUTOPILOT TAKEOFF POWER ACTIVE
@@ -1131,6 +1133,10 @@ shared:
   - # A32NX_ATC_Panel_TARA
     type: var
     var_name: L:A32NX_SWITCH_TCAS_Position
+    var_type: f64
+  -
+    type: var
+    var_name: L:A32NX_SWITCH_TCAS_Traffic_Position
     var_type: f64
   -
     type: var
@@ -1341,6 +1347,23 @@ shared:
     type: var
     var_name: L:A32NX_COCKPIT_DOOR_LOCKED
     var_type: f64
+  # Take control priority
+  -
+    type: ProgramAction
+    action: TakeControls
+    var_name: L:A32NX_PRIORITY_TAKEOVER:1
+    var_type: f64
+    condition:
+      equals:
+        F64: 1.0
+  -
+    type: ProgramAction
+    action: TakeControls
+    var_name: L:A32NX_PRIORITY_TAKEOVER:2
+    var_type: f64
+    condition:
+      equals:
+        F64: 1.0
   - # ASOBO_HANDLING_Wheel_ElevatorTrim_Template
     type: NumSet
     var_name: A:ELEVATOR TRIM PCT
@@ -1358,17 +1381,25 @@ shared:
 
 master:
   -
-    type: Var
+    type: NumSet
     var_name: A:GENERAL ENG THROTTLE LEVER POSITION:1
-    var_units: Number
+    var_units: Position 16k
     var_type: f64
-    constant: true
+    event_name: THROTTLE1_SET
+    interpolate: Invert
   -
-    type: Var
+    type: NumSet
     var_name: A:GENERAL ENG THROTTLE LEVER POSITION:2
-    var_units: Number
+    var_units: Position 16k
     var_type: f64
-    constant: true
+    event_name: THROTTLE2_SET
+    interpolate: Invert
+  -
+    type: ToggleSwitch
+    var_name: A:AUTOPILOT THROTTLE ARM
+    var_units: Bool
+    var_type: bool
+    event_name: AUTO_THROTTLE_ARM
 
 init:
   -

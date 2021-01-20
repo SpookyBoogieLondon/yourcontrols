@@ -38,6 +38,7 @@ var server_ip6radio = document.getElementById("server-ip6")
 var cloudMethod = document.getElementById("punchthrough-radio")
 var directMethod = document.getElementById("direct-radio")
 var upnpMethod = document.getElementById("upnp-radio")
+var relayMethod = document.getElementById("relay-radio")
 
 var sessionDiv = document.getElementById("session-div")
 var sessionIpRadios = document.getElementById("session-ip-radios")
@@ -47,6 +48,15 @@ var joinConnectDirect = document.getElementById("join-connect-direct")
 var joinConnectCloud = document.getElementById("join-connect-cloud")
 var joinIpInput = document.getElementById("join-ip-input")
 var joinPortInput = document.getElementById("join-port-input")
+
+// Network
+var networkDiv = document.getElementById("network")
+var downloadBandwidth = document.getElementById("download-bandwidth")
+var downloadRate = document.getElementById("download-rate")
+var uploadBandwidth = document.getElementById("upload-bandwidth")
+var uploadRate = document.getElementById("upload-rate")
+var networkLoss = document.getElementById("network-loss")
+var ping = document.getElementById("network-ping")
 
 var forceButton = document.getElementById("force-button")
 
@@ -69,11 +79,13 @@ function invoke(data) {
 function SetStuffVisible(visible) {
     if (is_client) {
         document.getElementById("not_user_client").hidden = visible;
-        document.getElementById("is_user_client").hidden = !visible;
+        document.getElementById("top-right-card").appendChild(networkDiv)
     } else {
         document.getElementById("not_server_running").hidden = visible;
-        document.getElementById("is_server_running").hidden = !visible;
+        document.getElementById("top-left-card").appendChild(networkDiv)
     }
+    networkDiv.hidden = !visible
+    ping.hidden = !is_client
     document.getElementById("is_client_server_running").hidden = visible;
     document.getElementById("not_client_server_running").hidden = !visible;
 }
@@ -103,6 +115,7 @@ function OnConnected() {
     session_ip6radio.disabled = true
     server_ip6radio.disabled = true
     cloudMethod.disabled = true
+    relayMethod.disabled = true
     directMethod.disabled = true
     upnpMethod.disabled = true
 
@@ -125,6 +138,7 @@ function OnDisconnect(text) {
     server_ip4radio.disabled = false
     session_ip6radio.disabled = false
     server_ip6radio.disabled = false
+    relayMethod.disabled = false
     cloudMethod.disabled = false
     directMethod.disabled = false
     upnpMethod.disabled = false
@@ -187,6 +201,15 @@ function LoadSettings(newSettings) {
     settings = newSettings
 }
 
+function UpdateMetrics(metrics) {
+    downloadBandwidth.textContent = "↓ " + metrics.receiveBandwidth.toFixed(2) + "KB/s"
+    downloadRate.textContent = Math.floor(metrics.receivePackets) + " Packets/s"
+    uploadBandwidth.textContent = "↑ " + metrics.sentBandwidth.toFixed(2) + " KB/s"
+    uploadRate.textContent = Math.floor(metrics.sentPackets) + " Packets/s"
+    networkLoss.textContent = (metrics.packetLoss * 100).toFixed(2) + "% Packet loss"
+    ping.textContent = metrics.ping + "ms"
+}
+
 // Handle server messages
 function MessageReceived(data) {
     switch (data["type"]) {
@@ -210,7 +233,13 @@ function MessageReceived(data) {
         case "server":
             is_client = false
             alert.updatetext("success", "Server started! " + data["data"])
+            $("#not_user_client").append(forceButton)
             OnConnected()
+            break;
+        case "host":
+            is_client = false;
+            forceButton.hidden = false
+            $("#not_server_running").append(forceButton)
             break;
         case "error":
             alert.updatetext("danger", data["data"])
@@ -275,6 +304,9 @@ function MessageReceived(data) {
         case "config_msg":
             LoadSettings(JSON.parse(data["data"]))
             break;
+        case "metrics":
+            UpdateMetrics(JSON.parse(data["data"]))
+            break;
     }
 }
 
@@ -337,18 +369,22 @@ upnpMethod.addEventListener("change", function() {
     port_div.hidden = false
 })
 
+relayMethod.addEventListener("change", function() {
+    port_div.hidden = true
+})
+
 joinConnectCloud.addEventListener("change", function() {
     sessionDiv.hidden = false
     joinPortDiv.hidden = true
     joinIpDiv.hidden = true
-    sessionIpRadios.hidden = false
+    sessionIpRadios.hidden = true
 })
 
 joinConnectDirect.addEventListener("change", function() {
     sessionDiv.hidden = true
     joinPortDiv.hidden = false
     joinIpDiv.hidden = false
-    sessionIpRadios.hidden = true
+    sessionIpRadios.hidden = false
 })
 
 joinPortInput.addEventListener("change", function() {
@@ -390,7 +426,7 @@ $("#main-form-host").submit(function(e) {
     if (is_connected) {invoke({type: "disconnect"}); return}
 
     // Get radio button
-    const method = cloudMethod.checked ? cloudMethod.value : directMethod.checked ? directMethod.value : upnpMethod.checked ? upnpMethod.value : "";
+    const method = cloudMethod.checked ? cloudMethod.value : relayMethod.checked ? relayMethod.value : directMethod.checked ? directMethod.value : upnpMethod.checked ? upnpMethod.value : "";
     const port_ok = method == "cloudServer" ? true : ValidateInt(port_input_host);
 
     if (!port_ok || !ValidateName(username)) {return}
@@ -442,8 +478,6 @@ $("#main-form-join").submit(function(e) {
     } 
 
     FormButtonsDisabled(true)
-
-    UpdateAircraft(aircraftList.value)
     invoke(data);
 })
 

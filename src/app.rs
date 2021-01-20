@@ -1,16 +1,19 @@
 use base64;
 use crossbeam_channel::{Receiver, TryRecvError, unbounded};
+use laminar::Metrics;
 use std::{net::IpAddr, io::Read};
 use std::fs::File;
 use std::{sync::{Mutex, Arc, atomic::{AtomicBool, Ordering::SeqCst}}, thread};
 use serde::{Serialize, Deserialize};
-use crate::{simconfig, util::resolve_relative_path};
+use serde_json::json;
+use crate::{simconfig};
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub enum ConnectionMethod {
     Direct,
     UPnP,
+    Relay,
     CloudServer
 }
 
@@ -48,7 +51,7 @@ impl App {
         let (tx, rx) = unbounded();
 
         let mut logo = vec![];
-        File::open(resolve_relative_path("assets/logo.png")).unwrap().read_to_end(&mut logo).ok();
+        File::open("assets/logo.png").unwrap().read_to_end(&mut logo).ok();
 
         let handle = Arc::new(Mutex::new(None));
         let handle_clone = handle.clone();
@@ -217,5 +220,22 @@ impl App {
 
     pub fn send_config(&self, value: &str){
         self.invoke("config_msg", Some(value));
+    }
+
+    pub fn send_network(&self, metrics: &Metrics) {
+        self.invoke("metrics", Some(
+            json!({
+                "sentPackets": metrics.sent_packets,
+                "receivePackets": metrics.received_packets,
+                "sentBandwidth": metrics.sent_kbps,
+                "receiveBandwidth": metrics.receive_kbps,
+                "packetLoss": metrics.packet_loss,
+                "ping": metrics.rtt/2.0
+            }).to_string().as_str()
+        ))
+    }
+
+    pub fn set_host(&self){
+        self.invoke("host", None);
     }
 }

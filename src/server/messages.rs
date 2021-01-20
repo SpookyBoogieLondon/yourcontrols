@@ -1,21 +1,20 @@
-use std::{net::SocketAddr};
-
-use crossbeam_channel::{Sender};
-use laminar::{Packet, SocketEvent};
-use log::warn;
-use serde::{Serialize, Deserialize};
-use rmp_serde;
-
 use crate::definitions::AllNeedSync;
+use crossbeam_channel::{Receiver, Sender, TryRecvError};
+use laminar::{Metrics, Packet, Socket, SocketEvent};
+use rmp_serde::{self, decode, encode};
+use serde::{Serialize, Deserialize};
+use std::{io, net::SocketAddr};
+use zstd::block::{Compressor, Decompressor};
 
-use super::SenderReceiver;
-
-const ACK_BYTES: &[u8] = &[0x41, 0x43, 0x4b];
+const COMPRESS_DICTIONARY: &[u8] = include_bytes!("compress_dict.bin");
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum Payloads {
-    InvalidName {},
+    InvalidName,
     InvalidVersion {server_version: String},
+    AircraftDefinition {bytes: Box<[u8]>},
+    SetHost,
+    RequestHosting {self_hosted: bool},
     PlayerJoined {name: String, in_control: bool, is_server: bool, is_observer: bool},
     PlayerLeft {name: String},
     Update {data: AllNeedSync, from: String, is_unreliable: bool, time: f64},
@@ -29,81 +28,139 @@ pub enum Payloads {
     HostingReceived {session_id: String},
     AttemptConnection {peer: SocketAddr},
     PeerEstablished {peer: SocketAddr},
+    Heartbeat
+}
+
+pub enum Message {
+    Payload(SocketAddr, Payloads),
+    ConnectionClosed(SocketAddr),
+    Metrics(SocketAddr, Metrics)
 }
 
 #[derive(Debug)]
 pub enum Error {
-    ConnectionClosed(SocketAddr),
-    SerdeDecodeError(rmp_serde::decode::Error),
-    SerdeEncodeError(rmp_serde::encode::Error),
-    ReadTimeout,
-    Dummy
+    SerdeDecodeError(decode::Error),
+    SerdeEncodeError(encode::Error),
+    CompressError(io::Error),
+    ReadTimeout(TryRecvError),
+    NotProcessed
 }
 
-// Need to manually acknowledge since most of the time we don't send packets back
-fn acknowledge_packet(sender: &mut Sender<Packet>, packet: &Packet) {
-    if let laminar::DeliveryGuarantee::Reliable = packet.delivery_guarantee() {
-        match packet.order_guarantee() {
-            laminar::OrderingGuarantee::None => {}
-            laminar::OrderingGuarantee::Sequenced(stream) => {sender.send(Packet::reliable_sequenced(packet.addr(), ACK_BYTES.to_vec(), stream)).ok();},
-            laminar::OrderingGuarantee::Ordered(stream) => {sender.send(Packet::reliable_ordered(packet.addr(), ACK_BYTES.to_vec(), stream)).ok();}
-        };
+impl From<decode::Error> for Error {
+    fn from(e: decode::Error) -> Self {
+        Self::SerdeDecodeError(e)
     }
 }
 
-//
-
-pub fn get_next_message(transfer: &mut SenderReceiver) -> Result<(SocketAddr, Payloads), Error> {
-    let packet = match transfer.get_receiver().try_recv() {
-        Ok(event) => match event {
-            SocketEvent::Packet(packet) => packet,
-            SocketEvent::Disconnect(addr) |
-            SocketEvent::Timeout(addr) => {return Err(Error::ConnectionClosed(addr))}
-            _ => {return Err(Error::Dummy)}
-        }
-        Err(_) => return Err(Error::ReadTimeout)
-    };
-
-    // Handle acknowledgements
-    if packet.payload() != ACK_BYTES {
-        acknowledge_packet(transfer.get_sender(), &packet);
-    }
-
-    match rmp_serde::from_slice(packet.payload()) {
-        Ok(s) => Ok((packet.addr(), s)),
-        Err(e) => {
-            warn!("Could not deserialize packet! Reason: {}", e);
-            Err(Error::SerdeDecodeError(e))
-        }
+impl From<encode::Error> for Error {
+    fn from(e: encode::Error) -> Self {
+        Self::SerdeEncodeError(e)
     }
 }
 
-pub fn send_message(message: Payloads, target: SocketAddr, sender: &mut Sender<Packet>) -> Result<(), Error> {
-    let payload = rmp_serde::to_vec(&message).map_err(|e| Error::SerdeEncodeError(e))?;
+impl From<io::Error> for Error {
+    fn from(e: io::Error) -> Self {
+        Self::CompressError(e)
+    }
+}
 
-    let packet = match message {
+impl From<TryRecvError> for Error {
+    fn from(e: TryRecvError) -> Self {
+        Self::ReadTimeout(e)
+    }
+}
+
+fn get_packet_for_message(message: &Payloads, payload_bytes: Vec<u8>, target: SocketAddr) -> Packet {
+    match message {
         // Unused
         Payloads::AttemptConnection {..} |
         Payloads::HostingReceived {..} |
+        Payloads::SetHost {..} |
         // Used
+        Payloads::AircraftDefinition {..}  |
+        Payloads::InvalidVersion {..} | 
+        Payloads::InvalidName {..} => Packet::reliable_unordered(target, payload_bytes),
+        Payloads::PeerEstablished {..} |
+        Payloads::Handshake {..} => Packet::unreliable(target, payload_bytes),
         Payloads::InitHandshake {..} | 
         Payloads::PlayerJoined {..} | 
         Payloads::PlayerLeft {..} | 
         Payloads::SetObserver {..} |
         Payloads::Ready |
-        Payloads::TransferControl {..} => Packet::reliable_sequenced(target, payload, Some(3)),
-        Payloads::InvalidVersion {..} | 
-        Payloads::InvalidName {..} => Packet::reliable_unordered(target, payload),
-        Payloads::PeerEstablished {..} |
-        Payloads::Handshake {..} => Packet::unreliable(target, payload),
-        Payloads::Update {is_unreliable, ..} => if is_unreliable {Packet::unreliable_sequenced(target, payload, Some(1))} else {Packet::reliable_ordered(target, payload, Some(2))}
-    };
+        Payloads::TransferControl {..} |
+        Payloads::RequestHosting {..} | 
+        Payloads::Heartbeat => Packet::reliable_ordered(target, payload_bytes, Some(2)),
+        Payloads::Update {is_unreliable, ..} => if *is_unreliable {Packet::unreliable_sequenced(target, payload_bytes, Some(1))} else {Packet::reliable_ordered(target, payload_bytes, Some(2))}
+    }
+}
 
-    
-    match sender.try_send(packet) {
-        Ok(_) => Ok(()),
-        Err(e) => {
-            Err(Error::Dummy)
+pub struct SenderReceiver {
+    sender: Sender<Packet>,
+    receiver: Receiver<SocketEvent>,
+    compressor: Compressor,
+    decompressor: Decompressor
+}
+
+impl SenderReceiver {
+
+    pub fn from_socket(socket: &Socket) -> Self {
+        Self {
+            sender: socket.get_packet_sender(),
+            receiver: socket.get_event_receiver(),
+            compressor: Compressor::with_dict(COMPRESS_DICTIONARY.to_vec()),
+            decompressor: Decompressor::with_dict(COMPRESS_DICTIONARY.to_vec())
         }
+    }
+
+    pub fn get_next_message(&mut self) -> Result<Message, Error> {
+        // Receive packet
+        let packet = match self.receiver.try_recv()? {
+            SocketEvent::Packet(packet) => packet,
+            SocketEvent::Disconnect(addr) |
+            SocketEvent::Timeout(addr) => {return Ok(Message::ConnectionClosed(addr))},
+            SocketEvent::Metrics(addr, metrics) => {return Ok(Message::Metrics(addr, metrics))},
+            _ => {return Err(Error::NotProcessed)}
+        };
+    
+        // Decompress
+        let payload_bytes = self.decompressor.decompress(packet.payload(), 131072)?;
+        // Decode to struct
+        let payload = rmp_serde::from_slice(&payload_bytes)?;
+        return Ok(
+            Message::Payload(packet.addr(), payload)
+        );
+    }
+
+    fn prepare_payload_bytes(&mut self, message: &Payloads) -> Result<Vec<u8>, Error> {
+        // Struct to MessagePack
+        let payload = rmp_serde::to_vec(&message)?;
+        // Compress payload
+        return Ok(self.compressor.compress(&payload, 0)?);
+    }
+
+    pub fn send_message(&mut self, message: Payloads, target: SocketAddr) -> Result<(), Error> {
+        let payload_bytes = self.prepare_payload_bytes(&message)?;
+        // Send payload
+        self.sender.send(get_packet_for_message(
+            &message, 
+            payload_bytes,
+            target
+        )).ok();
+
+        Ok(())
+    }
+
+    pub fn send_message_to_multiple(&mut self, message: Payloads, targets: Vec<SocketAddr>) -> Result<(), Error> {
+        let payload_bytes = self.prepare_payload_bytes(&message)?;
+
+        for addr in targets {
+            self.sender.send(get_packet_for_message(
+                &message, 
+                payload_bytes.clone(),
+                addr
+            )).ok();
+        }
+
+        Ok(())
     }
 }

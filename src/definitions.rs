@@ -1,24 +1,28 @@
-use indexmap::IndexMap;
+use indexmap::{IndexMap};
 use serde_yaml::{self, Value};
 use serde::{Deserialize, Serialize};
 use simconnect::SimConnector;
 
-use std::{collections::HashMap, collections::HashSet, collections::hash_map::Entry, fmt::Display, fs::File, time::Instant, path::PathBuf};
-use crate::{interpolate::Interpolate, interpolate::InterpolateOptions, sync::{gaugecommunicator::{GetResult, LVarResult}, jscommunicator::{self, JSCommunicator}, transfer::{AircraftVars, Events, LVarSyncer}}, syncdefs::{CustomCalculator, NumDigitSet, NumIncrement, NumSet, Syncable, ToggleSwitch}, util::Category, util::InDataTypes, util::VarReaderTypes, util::resolve_relative_path, varreader::SimValue, velocity::VelocityCorrector};
+use std::{collections::HashMap, collections::{HashSet, hash_map}, fmt::{Debug, Display}, fs::File, path::{Path}, time::Instant};
+use crate::{sync::{gaugecommunicator::{GetResult, InterpolateData, LVarResult, InterpolationType}, jscommunicator::{self, JSCommunicator}, transfer::{AircraftVars, Events, LVarSyncer}}, syncdefs::{CustomCalculator, NumDigitSet, NumIncrement, NumSet, Syncable, ToggleSwitch}, util::Category, util::InDataTypes, util::VarReaderTypes, velocity::VelocityCorrector};
 
 #[derive(Debug)]
 pub enum ConfigLoadError {
-    FileError,
+    FileError(std::io::Error),
     YamlError(serde_yaml::Error, String),
-    ParseError(VarAddError, String)
+    ParseError(VarAddError, String),
+    ParseBytesError(VarAddError),
+    InvalidBytes(rmp_serde::decode::Error)
 }
 
 impl Display for ConfigLoadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ConfigLoadError::FileError => write!(f, "Could not open file."),
-            ConfigLoadError::YamlError(e, file_name) => write!(f, "Could not parse {} as YAML...{}", file_name, e.to_string()),
-            ConfigLoadError::ParseError(e, file_name) => write!(f, "Error parsing configuration in {}...{}", file_name, e)
+            ConfigLoadError::FileError(e) => write!(f, "Could not open file...{}", e),
+            ConfigLoadError::YamlError(e, file_name) => write!(f, "Could not parse {} as YAML...{}", file_name, e),
+            ConfigLoadError::ParseError(e, file_name) => write!(f, "Error parsing configuration in {}...{}", file_name, e),
+            ConfigLoadError::ParseBytesError(e) => write!(f, "Error parsing bytes configuration...{}", e),
+            ConfigLoadError::InvalidBytes(e) => write!(f, "Could not parse bytes as YAML...{}", e),
         }
     }
 }
@@ -84,22 +88,25 @@ macro_rules! try_cast_yaml {
 }
 
 macro_rules! execute_mapping {
-    ($new_value_name: ident, $action_name: ident, $new_value: expr, $mapping: expr, $action: block, $var_only_action: block) => {
+    ($new_value_name: ident, $action_name: ident, $new_value: expr, $mapping: expr, $action: block, $var_only_action: block, $program_action: block) => {
         match $new_value {
             VarReaderTypes::Bool($new_value_name) => match &mut $mapping.action {
                 ActionType::Bool($action_name) => $action
+                ActionType::ProgramAction($action_name) => $program_action
                 ActionType::VarOnly => $var_only_action
                 _ => {}
             }
 
             VarReaderTypes::I32($new_value_name) => match &mut $mapping.action {
                 ActionType::I32($action_name) => $action
+                ActionType::ProgramAction($action_name) => $program_action
                 ActionType::VarOnly => $var_only_action
                 _ => {}
             }
 
             VarReaderTypes::F64($new_value_name) => match &mut $mapping.action {
                 ActionType::F64($action_name) => $action
+                ActionType::ProgramAction($action_name) => $program_action
                 ActionType::VarOnly => $var_only_action
                 _ => {}
             }
@@ -213,9 +220,9 @@ struct VarEntry {
     var_name: String,
     var_units: Option<String>,
     var_type: InDataTypes,
-    interpolate: Option<InterpolateOptions>,
     update_every: Option<f64>,
     condition: Option<Condition>,
+    interpolate: Option<InterpolationType>,
     #[serde(default)]
     constant: bool,
     #[serde(default)]
@@ -244,6 +251,7 @@ struct NumSetGenericEntry<T> {
     event_param: Option<u32>,
     multiply_by: Option<T>,
     add_by: Option<T>,
+    interpolate: Option<InterpolationType>,
     #[serde(default)]
     use_calculator: bool,
     #[serde(default)]
@@ -281,6 +289,20 @@ struct CustomCalculatorEntry {
     get: String,
     set: String,
     condition: Option<Condition>
+}
+
+#[derive(Deserialize)]
+struct ProgramActionEntry {
+    var_name: String,
+    var_units: Option<String>,
+    var_type: InDataTypes,
+    condition: Condition,
+    action: ProgramAction
+}
+
+#[derive(Deserialize)]
+enum ProgramAction {
+    TakeControls
 }
 
 // The struct that get_need_sync returns. Holds all the aircraft/local variables and events that have changed since the last call.
@@ -342,6 +364,7 @@ enum ActionType {
     F64(Box<dyn Syncable<f64>>),
     I32(Box<dyn Syncable<i32>>),
     Bool(Box<dyn Syncable<bool>>),
+    ProgramAction(ProgramAction),
     VarOnly
 }
 
@@ -382,6 +405,8 @@ struct Mapping {
 }
 
 pub struct Definitions {
+    // Serializable vec that houses all the definitions that can be sent over the network
+    definitions_buffer: IndexMap<String, Vec<Value>>,
     // Data that can be synced using booleans (ToggleSwitch, ToggleSwitchParam)
     mappings: HashMap<String, Vec<Mapping>>,
     // Events to listen to
@@ -399,18 +424,16 @@ pub struct Definitions {
     // Value to hold the current queue
     current_sync: AllNeedSync,
     last_written: HashMap<String, Instant>,
-    // Values to constantly keep updating, even if no data was received
-    constant_avars: HashMap<String, Option<VarReaderTypes>>,
     // Vars that shouldn't be sent reliably
     unreliable_vars: HashSet<String>,
     // Helper struct to correct aircraft velocity
     velocity_corrector: VelocityCorrector,
     // Vars that should not be sent over the network
     do_not_sync: HashSet<String>,
-    // Structs that actually do the interpolation
-    interpolation_avars: Interpolate,
     // Vars that need interpolation
     interpolate_vars: HashSet<String>,
+    // For indicating that an event has been triggered and the control should be transferred to the next person
+    pub control_transfer_requested: bool
 }
 
 fn get_category_from_string(category: &str) -> Result<Category, VarAddError> {
@@ -434,6 +457,7 @@ fn get_real_var_name(var_name: &str) -> String {
 impl Definitions {
     pub fn new() -> Self {
         Self {
+            definitions_buffer: IndexMap::new(),
             mappings: HashMap::new(),
             events: Events::new(1),
             lvarstransfer: LVarSyncer::new(),
@@ -444,9 +468,6 @@ impl Definitions {
 
             current_sync: AllNeedSync::new(),
 
-            interpolation_avars: Interpolate::new(),
-            
-            constant_avars: HashMap::new(),
             unreliable_vars: HashSet::new(),
             velocity_corrector: VelocityCorrector::new(2),
             do_not_sync: HashSet::new(),
@@ -454,6 +475,8 @@ impl Definitions {
             categories: HashMap::new(),
             periods: HashMap::new(),
             interpolate_vars: HashSet::new(),
+
+            control_transfer_requested: false,
         }
     }
 
@@ -461,11 +484,11 @@ impl Definitions {
         let (var_name, var_type) = self.add_var_string(category, &var.var_name, var.var_units.as_deref(), var.var_type)?;
 
         // Handle interpolation for this variable
-        if let Some(options) = var.interpolate {
+        if let Some(interpolate) = var.interpolate {
             self.interpolate_vars.insert(var_name.clone());
             
             if std::matches!(var_type, VarType::AircraftVar) {
-                self.interpolation_avars.set_key_options(&var_name, options);
+                self.lvarstransfer.transfer.add_interpolate_mapping(&var.var_name, var_name.clone(), var.var_units.as_deref(), interpolate);
             }
         }
 
@@ -476,10 +499,6 @@ impl Definitions {
         // Handle custom periods
         if let Some(period) = var.update_every {
             self.periods.insert(var_name.clone(), Period::new(period));
-        }
-
-        if var.constant {
-            self.constant_avars.insert(var_name.clone(), None);
         }
 
         self.add_mapping(var_name, ActionType::VarOnly, var.condition)?;
@@ -552,10 +571,10 @@ impl Definitions {
         };
 
         match self.mappings.entry(var_name.to_string()) {
-            Entry::Occupied(mut o) => { 
+            hash_map::Entry::Occupied(mut o) => { 
                 o.get_mut().push(mapping)
             }
-            Entry::Vacant(v) => { v.insert(vec![mapping]); }
+            hash_map::Entry::Vacant(v) => { v.insert(vec![mapping]); }
         };
 
         Ok(())
@@ -589,39 +608,51 @@ impl Definitions {
         Ok(())
     }
 
-    fn add_num_set_generic<T>(&mut self, data_type: InDataTypes, category: &str, var: NumSetGenericEntry<T>) -> Result<(Box<NumSet<T>>, String), VarAddError> where T: Default {
+    fn add_num_set_generic<T>(&mut self, data_type: InDataTypes, category: &str, var: NumSetGenericEntry<T>) -> Result<(Option<Box<NumSet<T>>>, String), VarAddError> where T: Default {
         let event_id = self.events.get_or_map_event_id(&var.event_name, false);
 
         let (var_string, _) = self.add_var_string(category, &var.var_name, var.var_units.as_deref(), data_type)?;
 
-        let mut action = Box::new(NumSet::new(event_id));
+        if let Some(interpolate_type) = var.interpolate {
 
-        if var.use_calculator || var.event_param.is_some() {
-            action.set_calculator_event_name(Some(&var.event_name), var.event_param.is_some())
+            self.lvarstransfer.transfer.add_interpolate_mapping(&format!("K:{}", &var.event_name), var_string.clone(), var.var_units.as_deref(), interpolate_type);
+            self.interpolate_vars.insert(var_string.clone());
+            self.add_mapping(var_string.clone(), ActionType::VarOnly, None)?;
+
+        } else {
+
+            let mut action = Box::new(NumSet::new(event_id));
+
+            if var.unreliable {
+                self.unreliable_vars.insert(var.var_name.clone());
+            }
+    
+            if var.use_calculator || var.event_param.is_some() {
+                action.set_calculator_event_name(Some(&var.event_name), var.event_param.is_some())
+            }
+    
+            if let Some(event_param) = var.event_param {
+                action.set_param(event_param, var.index_reversed);
+            }
+    
+            if let Some(multiply_by) = var.multiply_by {
+                action.set_multiply_by(multiply_by);
+            }
+    
+            if let Some(add_by) = var.add_by {
+                action.set_add_by(add_by);
+            }
+    
+            if let Some(swap_event) = var.swap_event_name.as_ref() {
+                let swap_event_id = self.events.get_or_map_event_id(swap_event, false);
+                action.set_swap_event(swap_event_id);
+            }
+
+            return Ok((Some(action), var_string))
+
         }
-
-        if var.unreliable {
-            self.unreliable_vars.insert(var.var_name.clone());
-        }
-
-        if let Some(event_param) = var.event_param {
-            action.set_param(event_param, var.index_reversed);
-        }
-
-        if let Some(multiply_by) = var.multiply_by {
-            action.set_multiply_by(multiply_by);
-        }
-
-        if let Some(add_by) = var.add_by {
-            action.set_add_by(add_by);
-        }
-
-        if let Some(swap_event) = var.swap_event_name.as_ref() {
-            let swap_event_id = self.events.get_or_map_event_id(swap_event, false);
-            action.set_swap_event(swap_event_id);
-        }
-
-        Ok((action, var_string))
+        
+        return Ok((None, var_string))
     }
 
     fn add_num_set(&mut self, category: &str, var: Value) -> Result<(), VarAddError> {
@@ -633,11 +664,15 @@ impl Definitions {
         match data_type {
             InDataTypes::I32 => {
                 let (mapping, var_string) = self.add_num_set_generic::<i32>(data_type, category, try_cast_yaml!(var))?;
-                self.add_mapping(var_string, ActionType::I32(mapping), condition)?
+                if let Some(mapping) = mapping {
+                    self.add_mapping(var_string, ActionType::I32(mapping), condition)?
+                }
             }
             InDataTypes::F64 => {
                 let (mapping, var_string) = self.add_num_set_generic::<f64>(data_type, category, try_cast_yaml!(var))?;
-                self.add_mapping(var_string, ActionType::F64(mapping), condition)?
+                if let Some(mapping) = mapping {
+                    self.add_mapping(var_string, ActionType::F64(mapping), condition)?
+                }
             }
             _ => {}
         };
@@ -707,24 +742,61 @@ impl Definitions {
         Ok(())
     }
 
+    fn add_program_action(&mut self, category: &str, var: ProgramActionEntry) -> Result<(), VarAddError> {
+
+        let (var_string, _) = self.add_var_string(category, &var.var_name, var.var_units.as_deref(), var.var_type)?;
+        self.add_mapping(var_string, ActionType::ProgramAction(var.action), Some(var.condition))?;
+
+        Ok(())
+    }
+
+    fn add_to_buffer(&mut self, category: String, value: Value) {
+        match self.definitions_buffer.entry(category) {
+            indexmap::map::Entry::Occupied(mut o) => {o.get_mut().push(value)},
+            indexmap::map::Entry::Vacant(v) => {v.insert(vec![value]);}
+        };
+    }
+
+    pub fn get_buffer_bytes(&mut self) -> Vec<u8> {
+        rmp_serde::to_vec(&self.definitions_buffer).unwrap()
+    }
+
     // Calls the correct method for the specified "action" type
-    fn parse_var(&mut self, category: &str, value: Value) -> Result<(), VarAddError> {
+    fn parse_var(&mut self, category: String, value: Value) -> Result<(), VarAddError> {
         let type_str = check_and_return_field!("type", value, str);
 
         // self.check_other_common_fields(&value);
+        let value_clone = value.clone();
+
 
         match type_str.to_uppercase().as_str() {
-            "VAR" => self.add_var(category, try_cast_yaml!(value))?,
-            "EVENT" => self.add_event(category, try_cast_yaml!(value))?,
-            "TOGGLESWITCH" => self.add_toggle_switch(category, try_cast_yaml!(value))?,
-            "NUMSET" => self.add_num_set(category, try_cast_yaml!(value))?,
-            "NUMINCREMENT" => self.add_num_increment(category, try_cast_yaml!(value))?,
-            "NUMDIGITSET" => self.add_num_digit_set(category, try_cast_yaml!(value))?,
-            "CUSTOMCALCULATOR" => self.add_custom_calculator(category, try_cast_yaml!(value))?,
+            "VAR" => self.add_var(&category, try_cast_yaml!(value))?,
+            "EVENT" => self.add_event(&category, try_cast_yaml!(value))?,
+            "TOGGLESWITCH" => self.add_toggle_switch(&category, try_cast_yaml!(value))?,
+            "NUMSET" => self.add_num_set(&category, try_cast_yaml!(value))?,
+            "NUMINCREMENT" => self.add_num_increment(&category, try_cast_yaml!(value))?,
+            "NUMDIGITSET" => self.add_num_digit_set(&category, try_cast_yaml!(value))?,
+            "CUSTOMCALCULATOR" => self.add_custom_calculator(&category, try_cast_yaml!(value))?,
+            "PROGRAMACTION" => self.add_program_action(&category, try_cast_yaml!(value))?,
             _ => return Err(VarAddError::InvalidSyncType(type_str.to_string()))
         };
+        
+        self.add_to_buffer(category, value_clone);
 
         return Ok(());
+    }
+
+    fn shrink_maps(&mut self) {
+        self.mappings.shrink_to_fit();
+        self.categories.shrink_to_fit();
+        self.periods.shrink_to_fit();
+        self.unreliable_vars.shrink_to_fit();
+        self.do_not_sync.shrink_to_fit();
+        self.interpolate_vars.shrink_to_fit();
+
+        self.lvarstransfer.shrink_maps();
+        self.events.shrink_maps();
+        self.avarstransfer.shrink_maps();
     }
 
     // Iterates over the yaml's "actions"
@@ -734,7 +806,7 @@ impl Definitions {
                 for include_file in value {
                     let file_name = include_file.as_str().unwrap();
 
-                    match self.load_config(&resolve_relative_path(file_name)) {
+                    match self.load_config(file_name) {
                         Ok(_) => (),
                         Err(e) => {
                             if let ConfigLoadError::ParseError(e, _) = e {
@@ -745,43 +817,62 @@ impl Definitions {
                 }
             } else {
                 for var_data in value {
-                    self.parse_var(key.as_str(), var_data)?;
+                    self.parse_var(key.clone(), var_data)?;
                 }
             }
             
         }
 
+        // Shrink all maps
+        self.shrink_maps();
+
         Ok(())
     }
 
     // Load yaml from file
-    pub fn load_config(&mut self, path: &PathBuf) -> Result<(), ConfigLoadError> {
-        let file = match File::open(path) {
-            Ok(f) => f,
-            Err(_) => return Err(ConfigLoadError::FileError)
-        };
+    pub fn load_config(&mut self, path: impl AsRef<Path> + Display) -> Result<(), ConfigLoadError> {
+        let path_string = path.to_string();
 
-        let yaml: IndexMap<String, Vec<Value>> = match serde_yaml::from_reader(file) {
-            Ok(y) => y,
-            Err(e) => return Err(ConfigLoadError::YamlError(e, path.to_string_lossy().into_owned()))
-        };
+        let file = File::open(path)
+            .map_err(|e| ConfigLoadError::FileError(e))?;
 
-        match self.parse_yaml(yaml) {
-            Ok(_) => Ok(()),
-            Err(e) => Err(ConfigLoadError::ParseError(e, path.to_string_lossy().into_owned()))
-        }
+        let yaml: IndexMap<String, Vec<Value>> = serde_yaml::from_reader(file)
+            .map_err(|e| ConfigLoadError::YamlError(e, path_string.clone()))?;
+
+        self.parse_yaml(yaml)
+            .map_err(|e| ConfigLoadError::ParseError(e, path_string.clone()))
     }
 
+    pub fn load_config_from_bytes(&mut self, bytes: Box<[u8]>) -> Result<(), ConfigLoadError> {
+        let yaml: IndexMap<String, Vec<Value>> = rmp_serde::from_slice(&bytes)
+            .map_err(|e| ConfigLoadError::InvalidBytes(e))?;
+
+        self.parse_yaml(yaml)
+            .map_err(|e| ConfigLoadError::ParseBytesError(e))
+    }
+
+    #[allow(unused_variables)]
     fn process_local_var(&mut self, result: GetResult) {
+        let mut should_write = self.did_write_recently(&result.var_name);
+
         if let Some(mappings) = self.mappings.get_mut(&result.var_name) {
             for mapping in mappings {
+
+                if !evalute_condition(&self.lvarstransfer, &self.avarstransfer, mapping.condition.as_ref(), &VarReaderTypes::F64(result.var.floating)) {continue}
+
                 execute_mapping!(new_value, action, VarReaderTypes::F64(result.var.floating), mapping, {
                     action.set_current(new_value)
-                }, {});
+                }, {}, {
+                    match action {
+                        ProgramAction::TakeControls => self.control_transfer_requested = true
+                    }
+                    should_write = false;
+                });
+                
             }
         }
 
-        if self.did_write_recently(&result.var_name) {return}
+        if !should_write {return}
         self.current_sync.lvars.insert(result.var_name, result.var.floating);
     }
 
@@ -835,6 +926,7 @@ impl Definitions {
     }
 
     // Process changed aircraft variables and update SyncActions related to it
+    #[allow(unused_variables)]
     pub fn process_sim_object_data(&mut self, data: &simconnect::SIMCONNECT_RECV_SIMOBJECT_DATA) {
         self.velocity_corrector.process_sim_object_data(data);
 
@@ -851,7 +943,7 @@ impl Definitions {
                     for mapping in mappings {
                         execute_mapping!(new_value, action, value, mapping, {
                             action.set_current(new_value)
-                        }, {});
+                        }, {}, {});
                     }
                 }
 
@@ -870,36 +962,15 @@ impl Definitions {
         }
     }
 
-    fn add_constants_to_data(&mut self, data: &mut SimValue) {
-        // Add constants
-        for (var_name, value) in self.constant_avars.iter() {
-            if data.contains_key(var_name) {continue}
-            if let Some(value) = value {
-                data.insert(var_name.clone(), value.clone());
-            }
-        }
-    }
-
-    fn interpolate(&mut self, conn: &SimConnector) {
-        if let Some(mut aircraft_interpolation_data) = self.interpolation_avars.step() {
-            self.add_constants_to_data(&mut aircraft_interpolation_data);
-            self.write_aircraft_data_unchecked(conn, &aircraft_interpolation_data);
-        }
-    }
-
-    pub fn step(&mut self, conn: &SimConnector, should_interpolate: bool) {
+    pub fn step(&mut self) {
         self.process_js_data();
-
-        if !should_interpolate {return}
-        // Interpolate AVARS        
-        self.interpolate(conn);
     }
 
     fn filter_all_sync(&self, data: &mut AllNeedSync, sync_permission: &SyncPermission) {
         data.filter(|name| self.can_sync(name, sync_permission));
     }
 
-    fn split_interpolate(&self, data: &mut AllNeedSync) -> AllNeedSync {
+    fn split_unreliable(&self, data: &mut AllNeedSync) -> AllNeedSync {
         data.filter_keep(|name| self.interpolate_vars.contains(name) || self.unreliable_vars.contains(name))
     }
 
@@ -910,18 +981,12 @@ impl Definitions {
         // Filter out based on what the client's current permissions are
         self.filter_all_sync(&mut data, sync_permission);
         // Split into interpolated vs non interpolated values - used for reliable/unreliable transmissions
-        let regular = self.split_interpolate(&mut data);
+        let regular = self.split_unreliable(&mut data);
         // Convert into options
-        let interpolated = if data.is_empty() {None} else {Some(data)};
+        let unreliable = if data.is_empty() {None} else {Some(data)};
         let regular = if regular.is_empty() {None} else {Some(regular)};
 
-        return (interpolated, regular);
-    }
-
-    // Skip checking with self.sync_vars and creating a new hashmap - used for interpolation
-    fn write_aircraft_data_unchecked(&mut self, conn: &SimConnector, data: &AVarMap) {
-        if data.len() == 0 {return}
-        self.avarstransfer.set_vars(conn, data);
+        return (unreliable, regular);
     }
 
     fn can_sync(&self, var_name: &str, sync_permission: &SyncPermission) -> bool {
@@ -949,12 +1014,7 @@ impl Definitions {
         }
     }
 
-    fn reset_constants(&mut self) {
-        for value in self.constant_avars.values_mut() {
-            *value = None;
-        }
-    }
-
+    #[allow(unused_variables)]
     pub fn write_aircraft_data(&mut self, conn: &SimConnector, data: AVarMap, time: f64, interpolate: bool) {
         if data.len() == 0 {return}
 
@@ -965,14 +1025,11 @@ impl Definitions {
         let mut data = data;
         self.velocity_corrector.add_wind_component(&mut data);
 
+        let mut interpolation_data = Vec::new();
+
         // Only sync vars that are defined as so
         for (var_name, data) in data {
             self.last_written.insert(var_name.to_string(), Instant::now());
-
-            // Log constant
-            if let Some(value) = self.constant_avars.get_mut(&var_name) {
-                *value = Some(data.clone());
-            }
 
             // Otherwise sync them using defined events
             if let Some(mappings) = self.mappings.get_mut(&var_name) {
@@ -985,22 +1042,31 @@ impl Definitions {
                         if interpolate && self.interpolate_vars.contains(&var_name) {
                             // Queue data for interpolation
                             if let VarReaderTypes::F64(value) = data {
-                                self.interpolation_avars.queue_interpolate(&var_name, time, value)
+                                interpolation_data.push(InterpolateData {
+                                   name: var_name.clone(),
+                                   value,
+                                   time
+                                });
                             }
                         } else {
-                            // Set data right away
+                                // Set data right away
                             to_sync.insert(var_name.clone(), data.clone());
                         }
-                    });
+                    }, {});
                 }
             }
         }
 
-        if to_sync.len() == 0 {return;}
+        if interpolation_data.len() > 0 {
+            self.lvarstransfer.transfer.send_new_interpolation_data(conn, time, &interpolation_data);
+        }
 
-        self.avarstransfer.set_vars(conn, &to_sync);
+        if to_sync.len() > 0 {
+            self.avarstransfer.set_vars(conn, &to_sync);
+        }
     }
 
+    #[allow(unused_variables)]
     pub fn write_local_data(&mut self, conn: &SimConnector, data: LVarMap, _interpolate: bool) -> Result<(), WriteDataError> {
         for (var_name, value) in data {
 
@@ -1014,7 +1080,7 @@ impl Definitions {
                             action.set_new(new_value, conn, &mut self.lvarstransfer)
                         }, {
                             self.lvarstransfer.set(conn, &var_name, value.to_string().as_ref());
-                        });
+                        }, {});
         
                         self.last_written.insert(var_name.clone(), Instant::now());
 
@@ -1063,15 +1129,14 @@ impl Definitions {
 
     // To be called when SimConnect connects
     pub fn on_connected(&mut self, conn: &SimConnector) -> Result<(), ()> {
-        self.interpolation_avars.reset();
-
         self.avarstransfer.on_connected(conn);
         self.events.on_connected(conn);
         self.lvarstransfer.on_connected(conn);
         self.velocity_corrector.on_connected(conn);
 
         // Might be running another instance
-        if let Err(_) = self.jstransfer.start() {return Err(())};
+        self.jstransfer.start()
+            .map_err(|_| ())?;
 
         // Get aircraft data
         conn.request_data_on_sim_object(0, self.avarstransfer.define_id, 0, simconnect::SIMCONNECT_PERIOD_SIMCONNECT_PERIOD_SIM_FRAME, simconnect::SIMCONNECT_CLIENT_DATA_REQUEST_FLAG_CHANGED | simconnect::SIMCONNECT_CLIENT_DATA_REQUEST_FLAG_TAGGED, 0, 0, 0);
@@ -1101,10 +1166,5 @@ impl Definitions {
 
     pub fn get_number_lvars(&self) -> usize {
         return self.lvarstransfer.get_number_defined()
-    }
-
-    pub fn reset_interpolate(&mut self) {
-        self.interpolation_avars.reset();
-        self.reset_constants();
     }
 }
